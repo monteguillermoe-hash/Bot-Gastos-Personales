@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # APP FINANZAS 💰
 ## Misiones · Región 3
 
@@ -100,3 +101,7 @@ python -m http.server 8080
 credentials.json
 token.json
 ```
+=======
+# Bot-Gastos-Personales
+Bot de Telegram para registrar gastos personales
+>>>>>>> c16f79bd4be53d8c6c9ca7f46c7d943218096208
