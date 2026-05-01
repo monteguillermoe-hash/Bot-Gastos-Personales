@@ -2,8 +2,8 @@
 APP FINANZAS – Bot de Telegram + Google Sheets
 ================================================
 Dependencias:  pip install -r requirements.txt
-Credenciales:  coloca credentials.json (OAuth Desktop) en esta misma carpeta.
-Uso:           python3.11 bot.py
+Credenciales:  usar GOOGLE_CREDENTIALS desde variables de entorno en Render.
+Uso:           python bot.py
 """
 
 import os
@@ -13,12 +13,9 @@ from datetime import datetime
 from dotenv import load_dotenv
 import shlex
 import requests
-
-# ── Google Auth / Sheets ──────────────────────────────────────────────────────
+import json
 import gspread
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
+from google.oauth2.service_account import Credentials
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
 from telegram import Update
@@ -34,19 +31,34 @@ from telegram.ext import (
 load_dotenv()
 
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
-SPREADSHEET_ID   = "1R6CujT2y1BY24nTQID9mieOd2Bek_NpFzDVhxC4f2T4"
-SCOPES           = [
+SPREADSHEET_ID   = os.getenv("SHEET_ID")   # tomado de variables de entorno
+SHEET_RANGE      = os.getenv("SHEET_RANGE")
+
+SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
-CREDENTIALS_FILE = os.path.join(os.path.dirname(__file__), "credentials.json")
-TOKEN_FILE       = os.path.join(os.path.dirname(__file__), "token.json")
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Autenticación con Google Sheets usando GOOGLE_CREDENTIALS
+# ─────────────────────────────────────────────────────────────────────────────
+creds_json = os.getenv("GOOGLE_CREDENTIALS")
+if not creds_json:
+    raise Exception("GOOGLE_CREDENTIALS no está configurada en Render")
+
+creds_data = json.loads(creds_json)
+creds = Credentials.from_service_account_info(creds_data, scopes=SCOPES)
+client = gspread.authorize(creds)
+
+# Abrir la hoja
+sheet = client.open_by_key(SPREADSHEET_ID).worksheet("Gastos Personales 2026")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Diccionario de clasificación – construido desde el historial del Excel
