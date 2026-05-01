@@ -1,29 +1,26 @@
-"""
-APP FINANZAS – Bot de Telegram + Google Sheets
-================================================
-Dependencias:  pip install -r requirements.txt
-Credenciales:  usar GOOGLE_CREDENTIALS desde variables de entorno en Render.
-Uso:           python bot.py
-"""
-
 import os
-import re
-import logging
-from datetime import datetime
-from dotenv import load_dotenv
-import shlex
-import requests
 import json
 import gspread
 from google.oauth2.service_account import Credentials
 
-# ── Telegram ──────────────────────────────────────────────────────────────────
-from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    ContextTypes,
-)
+# ── Configuración ─────────────────────────────────────────────────────────────
+SPREADSHEET_ID = os.getenv("SHEET_ID")
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+# ── Autenticación con Google Sheets ──────────────────────────────────────────
+creds_json = os.getenv("GOOGLE_CREDENTIALS")
+if not creds_json:
+    raise Exception("GOOGLE_CREDENTIALS no está configurada en Render")
+
+creds_data = json.loads(creds_json)
+creds = Credentials.from_service_account_info(creds_data, scopes=SCOPES)
+client = gspread.authorize(creds)
+
+# Abrir la hoja
+sheet = client.open_by_key(SPREADSHEET_ID).worksheet("Gastos Personales 2026")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuración
