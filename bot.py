@@ -2,13 +2,15 @@
 APP FINANZAS – Bot de Telegram + Google Sheets
 ================================================
 Dependencias:  pip install -r requirements.txt
-Credenciales:  coloca credentials.json (OAuth Desktop) en esta misma carpeta.
+Credenciales:  variable de entorno GOOGLE_CREDENTIALS (Service Account JSON).
 Uso:           python3.11 bot.py
 """
 
 import os
 import re
+import json
 import logging
+import threading
 from datetime import datetime
 from dotenv import load_dotenv
 import shlex
@@ -16,9 +18,7 @@ import requests
 
 # ── Google Auth / Sheets ──────────────────────────────────────────────────────
 import gspread
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
+from google.oauth2.service_account import Credentials
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
 from telegram import Update
@@ -28,19 +28,21 @@ from telegram.ext import (
     ContextTypes,
 )
 
+# ── Flask (keep-alive para Render) ────────────────────────────────────────────
+from flask import Flask
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuración
 # ─────────────────────────────────────────────────────────────────────────────
 load_dotenv()
 
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
-SPREADSHEET_ID   = "1R6CujT2y1BY24nTQID9mieOd2Bek_NpFzDVhxC4f2T4"
+SPREADSHEET_ID   = os.getenv("SPREADSHEET_ID", "1R6CujT2y1BY24nTQID9mieOd2Bek_NpFzDVhxC4f2T4")
 SCOPES           = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
-CREDENTIALS_FILE = os.path.join(os.path.dirname(__file__), "credentials.json")
-TOKEN_FILE       = os.path.join(os.path.dirname(__file__), "token.json")
+
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -269,25 +271,12 @@ def clasificar_medio(detalle: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Autenticación con Google
+# Autenticación con Google (Service Account)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_google_client() -> gspread.Client:
-    creds = None
-    if os.path.exists(TOKEN_FILE):
-        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-            logger.info("Token renovado automáticamente.")
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                CREDENTIALS_FILE, SCOPES
-            )
-            creds = flow.run_local_server(port=0, open_browser=True)
-            logger.info("Autorización completada. token.json guardado.")
-        with open(TOKEN_FILE, "w") as f:
-            f.write(creds.to_json())
+    creds_data = json.loads(os.getenv("GOOGLE_CREDENTIALS"))
+    creds = Credentials.from_service_account_info(creds_data, scopes=SCOPES)
     return gspread.authorize(creds)
 
 
@@ -438,16 +427,40 @@ async def cmd_gasto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Flask keep-alive – necesario para que Render no mate el proceso
+# Render exige que el servicio escuche en un puerto; este servidor
+# mínimo cumple ese requisito sin interferir con el polling de Telegram.
+# ─────────────────────────────────────────────────────────────────────────────
+
+flask_app = Flask(__name__)
+
+@flask_app.route("/")
+def health():
+    return "OK", 200
+
+def run_flask():
+    port = int(os.getenv("PORT", 8080))
+    flask_app.run(host="0.0.0.0", port=port)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Punto de entrada
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     if not TELEGRAM_TOKEN:
-        raise ValueError("TELEGRAM_TOKEN no está definido en el archivo .env")
+        raise ValueError("TELEGRAM_TOKEN no está definido en las variables de entorno")
+    if not os.getenv("GOOGLE_CREDENTIALS"):
+        raise ValueError("GOOGLE_CREDENTIALS no está definido en las variables de entorno")
+    if not SPREADSHEET_ID:
+        raise ValueError("SPREADSHEET_ID no está definido en las variables de entorno")
 
-    logger.info("Iniciando autenticación con Google…")
-    get_google_client()
-    logger.info("Autenticación exitosa. Iniciando bot de Telegram…")
+    # Arrancar Flask en hilo daemon (muere junto con el proceso principal)
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    logger.info("Servidor Flask keep-alive iniciado.")
+
+    logger.info("Iniciando bot de Telegram…")
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("ayuda", cmd_ayuda))
