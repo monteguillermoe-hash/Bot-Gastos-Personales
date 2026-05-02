@@ -10,6 +10,7 @@ import os
 import re
 import json
 import logging
+import asyncio
 import threading
 from datetime import datetime
 from dotenv import load_dotenv
@@ -468,6 +469,7 @@ def main() -> None:
     app.add_handler(CommandHandler("gasto", cmd_gasto))
 
     logger.info("Bot corriendo. Esperando mensajes…")
+    asyncio.set_event_loop(asyncio.new_event_loop())
     app.run_polling()
 
 
