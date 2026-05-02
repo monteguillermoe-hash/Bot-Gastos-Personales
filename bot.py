@@ -2,7 +2,7 @@
 APP FINANZAS – Bot de Telegram + Google Sheets
 ================================================
 Dependencias:  pip install -r requirements.txt
-Credenciales:  variable de entorno GOOGLE_CREDENTIALS (Service Account JSON).
+Credenciales:  coloca credentials.json (OAuth Desktop) en esta misma carpeta.
 Uso:           python3.11 bot.py
 """
 
@@ -15,9 +15,10 @@ import shlex
 import requests
 
 # ── Google Auth / Sheets ──────────────────────────────────────────────────────
-import json
 import gspread
-from google.oauth2.service_account import Credentials
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
 from telegram import Update
@@ -38,7 +39,8 @@ SCOPES           = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
-
+CREDENTIALS_FILE = os.path.join(os.path.dirname(__file__), "credentials.json")
+TOKEN_FILE       = os.path.join(os.path.dirname(__file__), "token.json")
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -267,12 +269,25 @@ def clasificar_medio(detalle: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Autenticación con Google (Service Account)
+# Autenticación con Google
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_google_client() -> gspread.Client:
-    creds_data = json.loads(os.getenv("GOOGLE_CREDENTIALS"))
-    creds = Credentials.from_service_account_info(creds_data, scopes=SCOPES)
+    creds = None
+    if os.path.exists(TOKEN_FILE):
+        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            logger.info("Token renovado automáticamente.")
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                CREDENTIALS_FILE, SCOPES
+            )
+            creds = flow.run_local_server(port=0, open_browser=True)
+            logger.info("Autorización completada. token.json guardado.")
+        with open(TOKEN_FILE, "w") as f:
+            f.write(creds.to_json())
     return gspread.authorize(creds)
 
 
@@ -429,10 +444,10 @@ async def cmd_gasto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 def main() -> None:
     if not TELEGRAM_TOKEN:
         raise ValueError("TELEGRAM_TOKEN no está definido en el archivo .env")
-    if not os.getenv("GOOGLE_CREDENTIALS"):
-        raise ValueError("GOOGLE_CREDENTIALS no está definido en las variables de entorno")
 
-    logger.info("Iniciando bot de Telegram…")
+    logger.info("Iniciando autenticación con Google…")
+    get_google_client()
+    logger.info("Autenticación exitosa. Iniciando bot de Telegram…")
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("ayuda", cmd_ayuda))
