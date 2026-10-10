@@ -12,7 +12,11 @@ import json
 import logging
 import asyncio
 import threading
-from datetime import datetime
+import unicodedata
+from datetime import datetime, timezone, timedelta
+
+# Argentina no aplica horario de verano desde 2009: UTC-3 fijo.
+TZ_ARGENTINA = timezone(timedelta(hours=-3))
 from dotenv import load_dotenv
 import shlex
 import requests
@@ -61,6 +65,29 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 CLASIFICACION_RUBRO: list[tuple[list[str], str, str]] = [
 
+    # ── PRIORITARIAS: impuestos/municipal por dirección ─────────────────────
+    # Van primero para que no las pise la regla genérica de "sanitario"
+    # de Obra/Estructura (ej: "Impuesto municipal sanitarios Falucho 901"
+    # es un impuesto, no una compra de sanitarios).
+    (["arboles", "extraccion raices"],            "Obra/Estructura",          "Instalaciones"),
+    (["falucho", "impuesto automotor", "automotor",
+      "impuesto municipal falucho"],              "Gasto Corriente",          "Aporte Familiar"),
+    (["pueyrredon"],                              "Gasto Corriente",          "Vivienda: Mantenimiento"),
+    (["^arba", "luz celta", "lavarropas"],         "Gasto Corriente",          "Aporte Familiar"),
+    # Fallback genérico (sin dirección específica) — va DESPUÉS de
+    # falucho/pueyrredon para no pisarlas.
+    (["impuesto municipal", "impuesto autom"],    "Gasto Corriente",          "Aporte Familiar"),
+
+    # Ir a ver un partido (espectador) es una salida, jugarlo es deporte.
+    (["partido basquet", "parido basquet",
+      "partido básquet", "parido básquet"],       "Gasto Corriente",          "Salidas y Viajes"),
+
+    # Comer afuera / sanguche / cena es salida, aunque diga "milanesa".
+    (["empanada de carne", "empanadas de carne"], "Gasto Corriente",          "Comida"),
+    (["sanguche", "sandwich", "^cena", "cena:", "empanada",
+      "medialuna", "3ds", "pollofrito", "comida viaje",
+      "comida - ", "fruta"],                      "Gasto Corriente",          "Salidas y Viajes"),
+
     # ── Ahorro / Inversiones ─────────────────────────────────────────────────
     (["zurich", "zurich interna"],               "Ahorro/Inversiones",       "Seguro de retiro"),
     (["nacion retiro", "aporte ordinario"],       "Ahorro/Inversiones",       "Seguro de retiro"),
@@ -68,27 +95,40 @@ CLASIFICACION_RUBRO: list[tuple[list[str], str, str]] = [
     # ── Obra / Estructura ────────────────────────────────────────────────────
     (["corralón", "corralo", "aleman"],           "Obra/Estructura",          "Materiales"),
     (["colorshop", "pintura interior"],           "Obra/Estructura",          "Materiales"),
-    (["materiales", "alemani"],                   "Obra/Estructura",          "Materiales"),
+    (["materiales", "alemani", "cemento"],        "Obra/Estructura",          "Materiales"),
     (["cables", "tapas ciegas", "altura -"],      "Obra/Estructura",          "Materiales"),
     (["recubrir escalon", "pvc"],                 "Obra/Estructura",          "Materiales"),
     (["plomeria", "plomería"],                    "Obra/Estructura",          "Materiales"),
     (["camuzzi instalac", "instalacion medidor"], "Obra/Estructura",          "Instalaciones"),
     (["vanitory", "sanitario", "griferia",
-      "griferí", "porc life", "tiza nat"],        "Obra/Estructura",          "Sanitarios/Grifería"),
+      "griferí", "porc life", "tiza nat",
+      "piazza cube", "kit accesorios baño"],      "Obra/Estructura",          "Sanitarios/Grifería"),
     (["var acero", "terminacion cocina",
       "terminaciones cocina"],                    "Obra/Estructura",          "Terminaciones: Cocina"),
     (["panel plafon", "plafon led", "spot embutir",
       "ferrolux", "lámpara led", "lampara led",
       "lamp led", "dicro", "zocalo gu10",
       "dicroica", "macroled"],                    "Obra/Estructura",          "Mobiliario Fijo y Equipamiento"),
-    (["mueble cocina"],                           "Obra/Estructura",          "Mobiliario Fijo y Equipamiento"),
+    (["mueble cocina", "mueble para cocina", "placar",
+      "pantalonero", "botinero", "escobero",
+      "escritorio en l", "mueble:"],                                 "Obra/Estructura",          "Mobiliario Fijo y Equipamiento"),
 
     # ── Equipamiento / Mobiliario ────────────────────────────────────────────
+    (["transformador", "centro elec",
+      "autotransformador", "ventilador", "freidora",
+      "carrito organizador", "cubre camilla",
+      "paleta ping pong", "ping pong",
+      "tabla de planchar"],                       "Equipamiento/Mobiliario",  "Mobiliario Fijo y Equipamiento"),
     (["toalla", "toallon", "juego toall",
-      "taper", "tabla cocina", "bazar"],          "Equipamiento/Mobiliario",  "Bazar y Blanco"),
+      "taper", "tabla cocina", "bazar",
+      "bombilla", "picar cortar"],                 "Equipamiento/Mobiliario",  "Bazar y Blanco"),
     (["tacho de basura", "escobilla baño",
       "set tachos", "bano accesorio",
       "baño accesorio"],                          "Equipamiento/Mobiliario",  "Baño/Accesorios"),
+    (["yogurtera", "almohadon"],                   "Gasto Corriente",          "Bazar y Blanco"),
+    (["deshumidificador", "deshumificador"],       "Gasto Corriente",          "Mobiliario Fijo y Equipamiento"),
+
+    (["antecedentes penales", "uber driver"],      "Gasto Corriente",          "Oficio"),
 
     # ── Educación / Formación ────────────────────────────────────────────────
     (["iete", "hogar cristiano", "evangelismo",
@@ -104,13 +144,24 @@ CLASIFICACION_RUBRO: list[tuple[list[str], str, str]] = [
     # ── Gasto Corriente – Préstamos ──────────────────────────────────────────
     (["cuota prestamo", "cuota préstamo",
       "prestamo hipotecario", "préstamo hipotecario",
-      "cuota prestamos", "cuota préstamos"],      "Gasto Corriente",          "Préstamos y Financiación"),
+      "cuota prestamos", "cuota préstamos",
+      "prestamo personal", "préstamo personal",
+      "cancelacion total prestamo",
+      "cancelación total préstamo"],              "Gasto Corriente",          "Préstamos y Financiación"),
     (["icbc"],                                    "Gasto Corriente",          "Préstamos y Financiación"),
 
     # ── Gasto Corriente – Impuestos / Gastos Bancarios ───────────────────────
     (["impuesto de sellos", "impuesto sellos",
       "sellos mercado pago", "sellos bna",
-      "sellos mp", "sellos bcо", "sellos bco"],   "Gasto Corriente",          "Gastos Bancarios"),
+      "sellos mp", "sellos bcо", "sellos bco",
+      "impuesto al sello", "comision administracion", "comisión",
+      "comision", "mastercard"],                  "Gasto Corriente",          "Gastos Bancarios"),
+
+    # ── Gasto Corriente – Vivienda ───────────────────────────────────────────
+    # (va antes que "Vehículo": "Nación seguros Casa ... incendio" no debe
+    # caer en mantenimiento del auto sólo porque dice "seguros")
+    (["calefactor", "impuesto inmobiliario"],      "Gasto Corriente",          "Vivienda Casa de Papá"),
+    (["camuzzi", "seguro de incendio"],            "Gasto Corriente",          "Vivienda: Mantenimiento"),
 
     # ── Gasto Corriente – Vehículo ───────────────────────────────────────────
     (["nacion seguros", "seguro del auto",
@@ -119,24 +170,14 @@ CLASIFICACION_RUBRO: list[tuple[list[str], str, str]] = [
       "llave cruz", "bateria moura", "bateria m22"],
                                                   "Gasto Corriente",          "Vehiculo: Mantenimiento"),
     (["ypf lavalle", "combustible viaje",
-      "nafta auto"],                              "Gasto Corriente",          "Vehiculo: Consumo"),
+      "nafta auto", "^combustible auto"],         "Gasto Corriente",          "Vehiculo: Consumo"),
     (["ypf combustible", "combustible 6,",
-      "combustible 6.", "moto combustible"],      "Gasto Corriente",          "Moto: Consumo"),
+      "combustible 6.", "moto combustible",
+      "combustible"],                             "Gasto Corriente",          "Moto: Consumo"),
     (["seguro de la moto", "seguro moto"],        "Gasto Corriente",          "Moto: Mantenimiento"),
 
-    # ── Gasto Corriente – Vivienda ───────────────────────────────────────────
-    (["calefactor", "impuesto inmobiliario"],      "Gasto Corriente",          "Vivienda Casa de Papá"),
-    (["camuzzi", "seguro de incendio",
-      "pueyrredon"],                              "Gasto Corriente",          "Vivienda: Mantenimiento"),
-    (["arba"],                                    "Gasto Corriente",          "Vivienda: Mantenimiento"),
-
-    # ── Gasto Corriente – Impuestos municipales ──────────────────────────────
-    (["falucho", "impuesto automotor",
-      "impuesto municipal falucho"],              "Gasto Corriente",          "Aporte Familiar"),
-    (["impuesto municipal", "impuesto autom"],    "Gasto Corriente",          "Aporte Familiar"),
-
     # ── Gasto Corriente – Telefonía ──────────────────────────────────────────
-    (["celular", "claro pay", "telefonia",
+    (["celular", "cargador", "claro pay", "telefonia",
       "telefonía", "factura claro"],              "Gasto Corriente",          "Telefonia movil"),
 
     # ── Gasto Corriente – Bienestar/Deportes ────────────────────────────────
@@ -154,13 +195,16 @@ CLASIFICACION_RUBRO: list[tuple[list[str], str, str]] = [
       "perfumería", "desodorante", "jabón liquido",
       "jabon liquido", "recortadora de barba",
       "aguifarma", "mini perfumero", "atomizador",
-      "perfumero", "coop obrera hogar recort"],   "Gasto Corriente",          "Cuidado Personal"),
+      "perfumero", "coop obrera hogar recort",
+      "cortabarba", "cepillo de dientes",
+      "shampoo", "elvive"],   "Gasto Corriente",          "Cuidado Personal"),
 
     # ── Gasto Corriente – Indumentaria ──────────────────────────────────────
     (["wwwdigitalsport", "ropa de trabajo",
       "ropa deportiva", "pantalones", "pegasus",
       "macowens", "indumentaria", "amazon",
-      "zapatill"],                                "Gasto Corriente",          "Indumentaria"),
+      "zapatill", "helly-hansen", "helly hansen",
+      "pantalon termico", "merpago*mercadolibre"],                                "Gasto Corriente",          "Indumentaria"),
 
     # ── Gasto Corriente – Comida ─────────────────────────────────────────────
     (["carne", "carniceria", "carnicería",
@@ -169,14 +213,20 @@ CLASIFICACION_RUBRO: list[tuple[list[str], str, str]] = [
       "market las heras", "kiosco agua",
       "camcas", "express av vicenta",
       "carrefour agua", "los2hermanos",
-      "ensalada"],                                "Gasto Corriente",          "Comida"),
+      "ensalada", "milanesa", "cultivo",
+      "yogurth", "galletitas", "yerba", "maple",
+      "huevo", "queso", "pechuga", "pollo",
+      "morron", "espinaca", "ricota", "kilogramos de papa",
+      "verduleria", "choclo", "masitas",
+      "dia tienda", "supermercados toledo comida",
+      "^comida"],                                  "Gasto Corriente",          "Comida"),
 
     # ── Gasto Corriente – Donaciones / Regalos ──────────────────────────────
     (["ofrenda", "regalo pastor", "regalo",
       "mochila matera", "florero", "jarron",
       "papeles carta", "pendrive",
       "perro conejo", "vino bodega",
-      "aceite de oliva", "llavero"],              "Gasto Corriente",          "Donacion/regalos"),
+      "aceite de oliva", "llavero", "guantes de gym"],              "Gasto Corriente",          "Donacion/regalos"),
 
     # ── Gasto Corriente – Salidas y Viajes ──────────────────────────────────
     # (regla amplia al final para no pisar las anteriores)
@@ -194,11 +244,18 @@ CLASIFICACION_RUBRO: list[tuple[list[str], str, str]] = [
       "bodega", "termas", "vea sm",
       "calentar agua", "fruta", "banana",
       "naranja", "3 arroyos taj", "pasajesplu",
-      "facturas ypf", "cena", "partido basquet",
+      "facturas ypf", "partido basquet",
       "polideportivo", "candado", "adaptador enchufe",
       "toallon magico", "neceser", "tapones oidos",
-      "botellas recargables", "atomizador viaje"],
-                                                  "Gasto Corriente",          "Salidas y Viajes"),
+      "botellas recargables", "atomizador viaje",
+      "valija", "samsonite", "carry on",
+      "adaptador", "tapones", "hamburguesa",
+      "hamburgesa", "cafeteria", "cafetería",
+      "sorty", "ushuaia", "aerolineas", "tren sarmiento",
+      "traslado", "entrada ", "almuerzo", "cookie",
+      "cafe en", "alba cafe", "miofiglio", "gaseosas",
+      "coca cola", "agua glaciar", "3ds", "supermercados toledo",
+      "cinco noches"],                             "Gasto Corriente",          "Salidas y Viajes"),
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -207,44 +264,80 @@ CLASIFICACION_RUBRO: list[tuple[list[str], str, str]] = [
 # Formato: lista de (palabras_clave, medio_de_pago)
 # ─────────────────────────────────────────────────────────────────────────────
 CLASIFICACION_MEDIO: list[tuple[list[str], str]] = [
-    # Recibo de sueldo
-    (["serv. u otros conceptos", "otros conceptos cps",
-      "nacion retiro", "aporte ordinario"],        "Recibo de Sueldo"),
-
-    # Débito en cuenta
+    # Débito en cuenta (ICBC va primero: "Cuota prestamos ICBC" siempre se
+    # paga por débito, a diferencia de "Cuota prestamos" a secas)
     (["icbc", "debito"],                           "Debito en cuenta"),
 
+    # Recibo de sueldo
+    (["serv. u otros conceptos", "otros conceptos cps",
+      "nacion retiro", "aporte ordinario",
+      "cuota prestamos", "cuota prestamo hipotecario",
+      "cuota préstamo hipotecario"],                "Recibo de Sueldo"),
+
     # Efectivo
-    (["ofrenda cdd", "ofrenda misionera",
-      "futbol", "fútbol", "pinchadura"],           "Efectivo"),
+    (["ofrenda cdd", "futbol", "fútbol",
+      "pinchadura"],                                "Efectivo"),
 
     # Transferencia
     (["iete", "curso de masaje", "gimnasio",
       "peluqueria", "peluquería",
-      "cuota prestamo hipotecario",
-      "cuota préstamo hipotecario",
       "factura claro", "claro pay",
       "comida viaje", "combustible viaje",
-      "transferencia"],                            "Transferencia"),
+      "transferencia"],                             "Transferencia"),
 
     # Tarjeta Débito
-    (["bateria moura", "7 facturas ypf",
+    (["bateria moura", "bateria", "7 facturas ypf",
       "celular"],                                  "Tarjeta Débito"),
 ]
 
 DEFAULT_MEDIO = "Tarjeta Crédito"
+
+# Medio habitual según sub-rubro, cuando el detalle no tiene ninguna palabra
+# clave de medio. Desde julio 2026 la comida del día a día se paga casi
+# siempre con débito en cuenta.
+MEDIO_POR_SUBRUBRO: dict[str, str] = {
+    "Comida": "Debito en cuenta",
+}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Funciones de clasificación
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _sin_acentos(texto: str) -> str:
+    """Quita tildes/diéresis (á→a, ñ→n, ü→u, etc.)."""
+    texto = unicodedata.normalize("NFKD", texto)
+    return "".join(c for c in texto if not unicodedata.combining(c))
+
+
 def _normalizar(texto: str) -> str:
-    """Minúsculas + eliminar prefijos de cuotas tipo '(Cuota N/M)'."""
+    """Minúsculas + sin acentos + eliminar prefijos de cuotas tipo '(Cuota N/M)'."""
     texto = texto.lower()
+    texto = _sin_acentos(texto)
     texto = re.sub(r"\(cuota\s+\d+/\d+\)", "", texto)
     texto = re.sub(r"cuota\s+\d+\s+de\s+\d+", "", texto)
     return texto
+
+
+def _match_keywords(keywords: list[str], texto_normalizado: str) -> bool:
+    """
+    Chequea si alguna keyword aparece en el texto ya normalizado.
+    Las keywords se comparan también sin acentos, así no hace falta
+    duplicar cada entrada con y sin tilde en los diccionarios.
+    Una keyword que empieza con '^' se busca como PALABRA COMPLETA
+    (con límites de palabra), para evitar falsos positivos como
+    "arba" matcheando dentro de "barba".
+    """
+    for kw in keywords:
+        kw_norm = _sin_acentos(kw.lower())
+        if kw_norm.startswith("^"):
+            patron = r"\b" + re.escape(kw_norm[1:]) + r"\b"
+            if re.search(patron, texto_normalizado):
+                return True
+        else:
+            if kw_norm in texto_normalizado:
+                return True
+    return False
 
 
 def clasificar_rubro(detalle: str) -> tuple[str, str]:
@@ -254,21 +347,21 @@ def clasificar_rubro(detalle: str) -> tuple[str, str]:
     """
     d = _normalizar(detalle)
     for keywords, rubro, subrubro in CLASIFICACION_RUBRO:
-        if any(kw in d for kw in keywords):
+        if _match_keywords(keywords, d):
             return rubro, subrubro
     return "Otros", "General"
 
 
-def clasificar_medio(detalle: str) -> str:
+def clasificar_medio(detalle: str, subrubro: str = "") -> str:
     """
-    Infiere el medio de pago más probable según el detalle.
-    Por defecto devuelve 'Tarjeta Crédito'.
+    Infiere el medio de pago más probable según el detalle (y, si no hay
+    palabra clave, según el sub-rubro). Por defecto 'Tarjeta Crédito'.
     """
     d = _normalizar(detalle)
     for keywords, medio in CLASIFICACION_MEDIO:
-        if any(kw in d for kw in keywords):
+        if _match_keywords(keywords, d):
             return medio
-    return DEFAULT_MEDIO
+    return MEDIO_POR_SUBRUBRO.get(subrubro, DEFAULT_MEDIO)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -377,7 +470,7 @@ async def cmd_gasto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not subcategoria:
         subcategoria = auto_subrubro
     if not medio:
-        medio = clasificar_medio(detalle)
+        medio = clasificar_medio(detalle, subcategoria)
 
     # ── Validar medio de pago ────────────────────────────────────────────────
     medios_validos = get_medios_pago()
@@ -386,7 +479,7 @@ async def cmd_gasto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         medio = DEFAULT_MEDIO
 
     # ── Fecha / hora / dólar ─────────────────────────────────────────────────
-    ahora     = datetime.now()
+    ahora     = datetime.now(TZ_ARGENTINA)
     fecha     = ahora.strftime("%d/%m/%Y")
     hora      = ahora.strftime("%H:%M:%S")
     dolar_bna = obtener_dolar_bna()
